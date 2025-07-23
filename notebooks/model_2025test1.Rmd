@@ -8,16 +8,16 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+
+```{r load data}
+load(here::here("notebooks/QTL_model_testing1.RData"))
+```
+
+
 notes:
 F138 doesn't have genotype data?
 # [don't run] archive code for getting ERAP2 expression for IFNG eQTL and IFNG reQTL.
 ```{r archive, warning=FALSE}
-Dir="/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/"
-setwd(Dir)
-
-#save.image(file=paste0(Dir,'/myEnvironment_main.RData'))
-#load("/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/myEnvironment_main.RData") # raw counts, CPM, log2(CPM+1), metadata, expressed genes by ct
-
 # INT stands for rank-based inverse normal transformation
 # function
 rankNorm <- function (y) {
@@ -31,27 +31,9 @@ rankNorm <- function (y) {
   y.rankNorm <- stats::qnorm(r.prob) # because qnorm(1) is infinite and qnorm(-1) is -Inf
   return(y.rankNorm)
 }
-
-metadata$biosample = paste0(metadata$donor,"_",metadata$celltype, "_", metadata$condition)
-df = data.frame(biosample=metadata$biosample, 
-                donor=metadata$donor_num,
-                counts=as.numeric(counts["ERAP2",]), 
-                CPM=as.numeric(CPM["ERAP2",]),
-                libsize=colSums(counts))
-df.MELIFNG = df[metadata$celltype=="MEL"&metadata$condition=="IFNG",]
-df.MELIFNG$rankNormCPM=rankNorm(df.MELIFNG$CPM)
-metadata.MELIFNG = metadata[metadata$celltype=="MEL"&metadata$condition=="IFNG",]
-
-df.MEL = df[metadata$celltype=="MEL"&(metadata$condition=="PBS"|metadata$condition=="IFNG"),]
-df.MEL$rankNormCPM=rankNorm(df.MEL$CPM)
-metadata.MEL = metadata[metadata$celltype=="MEL"&(metadata$condition=="PBS"|metadata$condition=="IFNG"),]
-
-outDir="/pi/manuel.garber-umw/human/skin/eQTLs/DREG/2025models/test1/"
-saveRDS(df.MELIFNG, paste0(outDir,"/ERAP_expression_MEL_IFNG.rds"))
-saveRDS(metadata.MELIFNG, paste0(outDir,"/metadata_MEL_IFNG.rds"))
-saveRDS(df.MEL, paste0(outDir,"/ERAP_expression_MEL_PBSandIFNG.rds"))
-saveRDS(metadata.MEL, paste0(outDir,"/metadata_MEL_PBSandIFNG.rds"))
 ```
+
+
 # load data
 ```{r load}
 library(dplyr)
