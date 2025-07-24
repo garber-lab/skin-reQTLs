@@ -1,0 +1,344 @@
+---
+title: "reQTL Model Selection Using QQplot"
+author: Genevieve Roberts
+output:
+  pdf_document:
+    latex_engine: pdflatex  # Specify the LaTeX engine
+date: "2025-07-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+options(warn = -1)
+library(knitr)
+library(kableExtra)
+library(pander)
+```
+
+## Load Packages
+
+```{r packages}
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(data.table)
+library(here)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(tibble)
+library(purrr)
+library(ggplot2)
+library(broom)
+library(broom.mixed)
+```
+
+\newpage
+
+# Explore the real data
+
+This is a presumably "real" reQTL SNP in melanocytes. The genotype is rs2910686
+and the gene expression is ERAP2. It's presumably real because it is also a known
+psoriasis GWAS SNP and in high LD to a causal SNP validated in vitro.
+```{r}
+#load the real data
+real_dat <- read.csv(here::here("notebooks/long_form_reQTL_data.csv")) %>%
+  arrange(donor)
+
+#make sure the reference group is set to "PBS"
+real_dat$condition <- relevel(factor(real_dat$condition), ref = "PBS")
+real_dat$genotype.nt <- relevel(factor(real_dat$genotype.nt), ref = "TT")
+```
+
+
+## Plot the real data
+```{r}
+# Create the plot
+
+# Reshape to long format for faceting
+real_dat_plot <- real_dat %>%
+  pivot_longer(cols = c(counts, CPM), names_to = "scale_type", values_to = "expression_value")
+
+# Create the plot
+ggplot(real_dat_plot, aes(x = factor(condition),
+                          y = expression_value,
+                          color = factor(genotype.num))) +
+  geom_point(alpha = 0.6) +
+  geom_line(aes(group = donor), alpha = 0.6) + 
+  labs(
+    title = "Interaction between Genotype and IFNg_treatment on Expression",
+    x = "IFNg Treatment",
+    y = "Expression Value",
+    color = "Genotype"
+  ) +
+  facet_wrap(scale_type ~ phase, scales = "free_y") +
+  theme_bw()
+```
+
+\newpage
+## Compare various model fits
+
+### Linear mixed effects (CPM) with random intercept for donor
+```{r}
+# Fit the Poisson regression model
+real_linear_model <- lmer(CPM ~ condition * genotype.num  +
+                            (1 | donor), #random intercept for donor
+                           data = real_dat)
+    
+# Clean up
+real_tidy_linear <- tidy(real_linear_model)
+pander(real_tidy_linear)
+```
+
+### Linear mixed effects (CPM) with random intercept for donor nested within phase
+```{r}
+# Fit the Poisson regression model
+real_linear_model <- lmer(CPM ~ condition * genotype.num  +
+                            (1 | phase/donor), #random intercept for donor, nested within phase
+                           data = real_dat)
+    
+# Clean up and pull the interaction term
+real_tidy_linear <- tidy(real_linear_model)
+pander(real_tidy_linear)
+```
+
+
+### Negative binomial mixed effects (counts) with random intercept for donor
+```{r}
+# Fit the Poisson regression model
+real_nb_model <- glmer.nb(counts ~ condition * genotype.num +
+                                 (1 | donor),
+                               data = real_dat)
+    
+# Clean up and pull the interaction term
+real_tidy_nb <- tidy(real_nb_model)
+pander(real_tidy_nb)
+```
+
+### LRT comparing nested models
+```{r}
+# Fit a reduced model
+real_poisson_model_red <- glmer.nb(counts ~ condition + genotype.nt + (1 | donor), #no interaction term
+                           data = real_dat)
+
+# Fit the Poisson regression model
+real_poisson_model <- glmer.nb(counts ~ condition * genotype.nt + (1 | donor), #interaction term
+                           data = real_dat)
+
+# Do a likelihood ratio test
+tidy_lrt <- tidy(anova(real_poisson_model_red, real_poisson_model, test = "LRT"))
+tidy_lrt
+```
+
+
+\newpage
+## Generate QQplots for Model Candidates
+
+```{r}
+### functions
+#function to permute outcome and record results for various model formulas
+generate_permuted_null <- function(model_formula,
+                                   data,
+                                   interaction_term_regex = ":",
+                                   permute_var = NULL,
+                                   n_perm = 100,
+                                   model_type = c("lmer", "glmer", "glmer.nb", "glm"),
+                                   family = poisson) {
+  
+  model_type <- match.arg(model_type)
+  model_formula_str <- paste(deparse(model_formula), collapse = " ")
+  
+  # Determine outcome variable for permutation
+  if (is.null(permute_var)) {
+    outcome_var <- all.vars(model_formula)[1]
+  } else {
+    outcome_var <- permute_var
+  }
+  
+  # Fit the model to the observed data
+  fit_model <- switch(
+    model_type,
+    lmer     = lmer(model_formula, data = data),
+    glmer    = glmer(model_formula, data = data, family = family),
+    glmer.nb = glmer.nb(model_formula, data = data),
+    glm      = glm(model_formula, data = data, family = family)
+  )
+  
+  # Extract observed interaction term results
+  observed_results <- tidy(fit_model) %>%
+    filter(str_detect(term, interaction_term_regex)) %>%
+    select(term, estimate, se = std.error, statistic = any_of("statistic"), p.value) %>%
+    mutate(type = "observed")
+  
+  # Generate permuted results
+  permuted_results <- map_dfr(1:n_perm, function(i) {
+    permuted_data <- data %>%
+      mutate(!!sym(outcome_var) := sample(!!sym(outcome_var)))
+    
+    perm_model <- tryCatch({
+      switch(
+        model_type,
+        lmer     = lmer(model_formula, data = permuted_data),
+        glmer    = glmer(model_formula, data = permuted_data, family = family),
+        glmer.nb = glmer.nb(model_formula, data = permuted_data),
+        glm      = glm(model_formula, data = permuted_data, family = family)
+      )
+    }, error = function(e) return(NULL))
+    
+    if (is.null(perm_model)) return(tibble())
+    
+    tidy(perm_model) %>%
+      filter(str_detect(term, interaction_term_regex)) %>%
+      select(term, estimate, se = std.error, statistic = any_of("statistic"), p.value) %>%
+      mutate(type = "null")
+  })
+  
+  # Combine and annotate
+  bind_rows(observed_results, permuted_results) %>%
+    mutate(model_formula = model_formula_str)
+}
+
+#function to plot multiple model qqplots on one plot together
+plot_qq_chisq <- function(sim_df) {
+  model_formula <- unique(sim_df$model_formula)
+
+  # Compute chi-squared statistics from estimates and SEs
+  sim_df <- sim_df %>%
+    mutate(
+      chisq = (estimate / se)^2,
+      p.value = pchisq(chisq, df = 1, lower.tail = FALSE)
+    )
+
+  # Get null and observed
+  null_chisq <- sim_df %>% filter(type == "null") %>% pull(chisq)
+  observed_chisq <- sim_df %>% filter(type == "observed") %>% pull(chisq)
+  empirical_pval <- mean(null_chisq >= observed_chisq, na.rm = TRUE)
+
+  # Prepare data for QQ plot
+  qq_df <- data.frame(
+    expected = sort(qchisq(ppoints(length(null_chisq)), df = 1)),
+    observed = sort(null_chisq),
+    type = "null"
+  )
+
+  observed_point <- data.frame(
+    expected = qchisq(0.5 / length(null_chisq), df = 1),
+    observed = observed_chisq,
+    label = paste0("Empirical p = ", signif(empirical_pval, 3))
+  )
+
+  ggplot(qq_df, aes(x = expected, y = observed)) +
+    geom_point(alpha = 0.4) +
+    geom_abline(slope = 1, intercept = 0, color = "gray") +
+    geom_point(data = observed_point, aes(x = expected, y = observed), color = "red", size = 3) +
+    geom_text(data = observed_point, aes(label = label), vjust = -1.5, color = "red") +
+    labs(x = "Expected Chi-sq (df=1)", y = "Observed Chi-sq",
+         title = "QQ Plot of Permuted vs Observed Interaction Chi-Sq",
+         subtitle = paste("Model:", model_formula)) +
+    theme_bw()
+}
+
+plot_qq_chisq_multi <- function(sim_df) {
+  # Compute chi-squared statistics
+  sim_df <- sim_df %>%
+    mutate(
+      chisq = (estimate / se)^2,
+      p.value = pchisq(chisq, df = 1, lower.tail = FALSE),
+      model_formula_family=str_c(model_formula, " ", paste0(family), " ", paste0(model_type))
+    )
+  
+  # Calculate empirical p-values per model_formula
+  empirical_pvals <- sim_df %>%
+    group_by(model_formula_family) %>%
+    summarise(
+      observed_chisq = chisq[type == "observed"],
+      null_chisq = list(chisq[type == "null"]),
+      empirical_pval = mean(null_chisq[[1]] >= observed_chisq, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  # Prepare data for QQ plot (null points only)
+  qq_df <- sim_df %>%
+    filter(type == "null") %>%
+    group_by(model_formula_family) %>%
+    arrange(chisq) %>%
+    mutate(
+      expected = qchisq(ppoints(n()), df = 1)
+    ) %>%
+    ungroup()
+  
+  # Prepare observed points (one per model)
+  observed_points <- empirical_pvals %>%
+    mutate(
+      expected = qchisq(1 - 0.5 / lengths(null_chisq), df = 1),
+      observed_pval = pchisq(observed_chisq, df = 1, lower.tail = FALSE),
+      label = paste0("p = ", signif(observed_pval, 3))
+      )
+  
+  # Plot
+  ggplot(qq_df, aes(x = expected, y = chisq, color = model_formula_family)) +
+    geom_point(alpha = 0.4) +
+    geom_abline(slope = 1, intercept = 0, color = "gray") +
+    geom_point(data = observed_points, aes(x = expected, y = observed_chisq), shape = 4, size = 4, stroke = 1.5) + # "X"
+    geom_text(data = observed_points, aes(x = expected, y = observed_chisq, label = label), vjust = -1, color = "black", size = 3) +
+    labs(
+      x = "Expected Chi-sq",
+      y = "Observed Chi-sq",
+      color = "Model Formula",
+      title = "QQ Plot of Permuted vs Observed Interaction Chi-Sq (Multiple Models)"
+    ) +
+    theme_bw()
+}
+```
+
+\newpage
+### Create a grid of models and plot them together
+First plot is all tested models
+```{r}
+# Define models we'd like to try
+model_grid <- tibble(
+  model_formula = list(
+    as.formula("CPM ~ condition * genotype.num + (1 | donor)"),
+    as.formula("CPM ~ condition * genotype.num"),
+    as.formula("counts ~ condition * genotype.num"),
+    as.formula("counts ~ condition * genotype.num + (1 | donor)"),
+    as.formula("counts ~ condition * genotype.num + (1 | donor)")
+  ),
+  model_type = c("lmer", "glm", "glm", "glmer", "glmer.nb"),
+  family = list(NA, gaussian(), poisson(), poisson(), NA)
+)
+
+# Run all models and return one flat dataframe
+flat_qq_results <- pmap_dfr(
+  list(model_grid$model_formula, model_grid$model_type, model_grid$family),
+  function(model_formula, model_type, family) {
+    result <- generate_permuted_null(
+      model_formula = model_formula,
+      data = real_dat,
+      model_type = model_type,
+      family = family,
+      n_perm = 500
+    )
+
+    tibble(
+      model_formula = paste(as.character(model_formula), collapse = " "),
+      model_type = model_type,
+      family = if (inherits(family, "family")) family$family else NA_character_
+    ) %>%
+      bind_cols(result) %>%
+      select(-"model_formula...10") %>%
+      rename(model_formula="model_formula...1")
+      
+  }
+)
+
+plot_qq_chisq_multi(flat_qq_results)
+```
+
+Second plot is only the non-poisson models to "zoom in"
+```{r}
+plot_qq_chisq_multi(
+  filter(flat_qq_results, is.na(family) | family != "poisson")
+)
+```
+
