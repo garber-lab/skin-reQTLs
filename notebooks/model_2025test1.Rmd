@@ -9,15 +9,10 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r load data}
-load(here::here("notebooks/QTL_model_testing1.RData"))
-```
-
-
 notes:
 F138 doesn't have genotype data?
 # [don't run] archive code for getting ERAP2 expression for IFNG eQTL and IFNG reQTL.
-```{r archive, warning=FALSE}
+```{r rankNorm fun, warning=FALSE}
 # INT stands for rank-based inverse normal transformation
 # function
 rankNorm <- function (y) {
@@ -37,18 +32,18 @@ rankNorm <- function (y) {
 # load data
 ```{r load}
 library(dplyr)
-library(tidyverse)
-library(DESeq2)
-library(BiocParallel)
+library(ggplot2)
+#library(DESeq2)
+#library(BiocParallel)
 library(magrittr)
 library(stringr)
-library(gplots)
-library(ggrepel)
-library(ggfortify)
-library(reactable)
-library(gridExtra)
+#library(gplots)
+#library(ggrepel)
+#library(ggfortify)
+#library(reactable)
+#library(gridExtra)
 
-load("/QTL_model_testing1.RData")
+load(here::here("notebooks/QTL_model_testing1.RData"))
 # Dir="~/Downloads/nl/human/skin/eQTLs/DREG/2025models/test1/"
 # df.MEL.IFNG <- readRDS(paste0(Dir,"/ERAP_expression_MEL_IFNG.rds"))
 # df.MEL.IFNG$donor <- paste0("F", df.MEL.IFNG$donor)
