@@ -31,6 +31,7 @@ library(purrr)
 library(ggplot2)
 library(broom)
 library(broom.mixed)
+library(ggrepel)
 ```
 
 \newpage
@@ -145,169 +146,174 @@ generate_permuted_null <- function(model_formula,
                                    model_type = c("lmer", "glmer", "glmer.nb", "glm"),
                                    family = poisson) {
   
+  
   model_type <- match.arg(model_type)
   model_formula_str <- paste(deparse(model_formula), collapse = " ")
   
-  # Determine outcome variable for permutation
   if (is.null(permute_var)) {
     outcome_var <- all.vars(model_formula)[1]
   } else {
     outcome_var <- permute_var
   }
   
-  # Fit the model to the observed data
-  fit_model <- switch(
-    model_type,
-    lmer     = lmer(model_formula, data = data),
-    glmer    = glmer(model_formula, data = data, family = family),
-    glmer.nb = glmer.nb(model_formula, data = data),
-    glm      = glm(model_formula, data = data, family = family)
-  )
+  # Helper to fit a model and capture warnings
+  fit_model_safely <- function(formula, data, model_type, family) {
+    warnings <- character()
+    
+    result <- withCallingHandlers(
+      tryCatch({
+        fit <- switch(
+          model_type,
+          lmer     = lmerTest::lmer(formula, data = data),
+          glmer    = glmer(formula, data = data, family = family),
+          glmer.nb = glmer.nb(formula, data = data),
+          glm      = glm(formula, data = data, family = family)
+        )
+        list(fit = fit, warnings = warnings)
+      }, error = function(e) {
+        list(fit = NULL, warnings = paste("Error:", conditionMessage(e)))
+      }),
+      warning = function(w) {
+        warnings <<- c(warnings, conditionMessage(w))
+        invokeRestart("muffleWarning")
+      }
+    )
+    
+    result$warnings <- paste(result$warnings, collapse = " | ")
+    result
+  }
   
-  # Extract observed interaction term results
-  observed_results <- tidy(fit_model) %>%
+  # Fit observed model
+  obs_model_result <- fit_model_safely(model_formula, data, model_type, family)
+  if (is.null(obs_model_result$fit)) return(tibble())  # skip if fail
+  
+  observed_results <- tidy(obs_model_result$fit) %>%
     filter(str_detect(term, interaction_term_regex)) %>%
-    select(term, estimate, se = std.error, statistic = any_of("statistic"), p.value) %>%
-    mutate(type = "observed")
+    mutate(
+      type = "observed",
+      model_formula = model_formula_str,
+      warning = obs_model_result$warnings
+    )
   
-  # Generate permuted results
+  # Permuted results
   permuted_results <- map_dfr(1:n_perm, function(i) {
     permuted_data <- data %>%
       mutate(!!sym(outcome_var) := sample(!!sym(outcome_var)))
     
-    perm_model <- tryCatch({
-      switch(
-        model_type,
-        lmer     = lmer(model_formula, data = permuted_data),
-        glmer    = glmer(model_formula, data = permuted_data, family = family),
-        glmer.nb = glmer.nb(model_formula, data = permuted_data),
-        glm      = glm(model_formula, data = permuted_data, family = family)
-      )
-    }, error = function(e) return(NULL))
+    perm_model_result <- fit_model_safely(model_formula, permuted_data, model_type, family)
     
-    if (is.null(perm_model)) return(tibble())
+    if (is.null(perm_model_result$fit)) return(tibble())
     
-    tidy(perm_model) %>%
+    tidy(perm_model_result$fit) %>%
       filter(str_detect(term, interaction_term_regex)) %>%
-      select(term, estimate, se = std.error, statistic = any_of("statistic"), p.value) %>%
-      mutate(type = "null")
+      mutate(
+        type = "null",
+        model_formula = model_formula_str,
+        warning = perm_model_result$warnings
+      )
   })
   
-  # Combine and annotate
-  bind_rows(observed_results, permuted_results) %>%
-    mutate(model_formula = model_formula_str)
+  bind_rows(observed_results, permuted_results)
 }
 
-#function to plot multiple model qqplots on one plot together
-plot_qq_chisq <- function(sim_df) {
-  model_formula <- unique(sim_df$model_formula)
 
-  # Compute chi-squared statistics from estimates and SEs
+plot_qq_pval_multi <- function(sim_df) {
+  # Load ggrepel for smart label positioning
+  library(ggrepel)
+  
+  # Ensure p-values are available and create model identifier
   sim_df <- sim_df %>%
     mutate(
-      chisq = (estimate / se)^2,
-      p.value = pchisq(chisq, df = 1, lower.tail = FALSE)
-    )
-
-  # Get null and observed
-  null_chisq <- sim_df %>% filter(type == "null") %>% pull(chisq)
-  observed_chisq <- sim_df %>% filter(type == "observed") %>% pull(chisq)
-  empirical_pval <- mean(null_chisq >= observed_chisq, na.rm = TRUE)
-
-  # Prepare data for QQ plot
-  qq_df <- data.frame(
-    expected = sort(qchisq(ppoints(length(null_chisq)), df = 1)),
-    observed = sort(null_chisq),
-    type = "null"
-  )
-
-  observed_point <- data.frame(
-    expected = qchisq(0.5 / length(null_chisq), df = 1),
-    observed = observed_chisq,
-    label = paste0("Empirical p = ", signif(empirical_pval, 3))
-  )
-
-  ggplot(qq_df, aes(x = expected, y = observed)) +
-    geom_point(alpha = 0.4) +
-    geom_abline(slope = 1, intercept = 0, color = "gray") +
-    geom_point(data = observed_point, aes(x = expected, y = observed), color = "red", size = 3) +
-    geom_text(data = observed_point, aes(label = label), vjust = -1.5, color = "red") +
-    labs(x = "Expected Chi-sq (df=1)", y = "Observed Chi-sq",
-         title = "QQ Plot of Permuted vs Observed Interaction Chi-Sq",
-         subtitle = paste("Model:", model_formula)) +
-    theme_bw()
-}
-
-plot_qq_chisq_multi <- function(sim_df) {
-  # Compute chi-squared statistics
-  sim_df <- sim_df %>%
-    mutate(
-      chisq = (estimate / se)^2,
-      p.value = pchisq(chisq, df = 1, lower.tail = FALSE),
-      model_formula_family=str_c(model_formula, " ", paste0(family), " ", paste0(model_type))
+      model_formula_family = str_c(model_formula, " ", paste0(family), " ", paste0(model_type))
     )
   
   # Calculate empirical p-values per model_formula
   empirical_pvals <- sim_df %>%
     group_by(model_formula_family) %>%
     summarise(
-      observed_chisq = chisq[type == "observed"],
-      null_chisq = list(chisq[type == "null"]),
-      empirical_pval = mean(null_chisq[[1]] >= observed_chisq, na.rm = TRUE),
+      observed_pval = p.value[type == "observed"],
+      null_pvals = list(p.value[type == "null"]),
+      empirical_pval = mean(null_pvals[[1]] <= observed_pval, na.rm = TRUE),
       .groups = "drop"
     )
   
   # Prepare data for QQ plot (null points only)
+  # Convert p-values to -log10 scale for better visualization
   qq_df <- sim_df %>%
     filter(type == "null") %>%
     group_by(model_formula_family) %>%
-    arrange(chisq) %>%
+    arrange(p.value) %>%
     mutate(
-      expected = qchisq(ppoints(n()), df = 1)
+      neg_log10_pval = -log10(p.value),
+      expected_neg_log10 = -log10(ppoints(n(), a = 0))
     ) %>%
     ungroup()
   
   # Prepare observed points (one per model)
   observed_points <- empirical_pvals %>%
     mutate(
-      expected = qchisq(1 - 0.5 / lengths(null_chisq), df = 1),
-      observed_pval = pchisq(observed_chisq, df = 1, lower.tail = FALSE),
+      observed_neg_log10 = -log10(observed_pval),
+      # Expected value for the most extreme point
+      expected_neg_log10 = -log10(0.5 / lengths(null_pvals)),
       label = paste0("p = ", signif(observed_pval, 3))
-      )
+    )
   
   # Plot
-  ggplot(qq_df, aes(x = expected, y = chisq, color = model_formula_family)) +
+  ggplot(qq_df, aes(x = expected_neg_log10, y = neg_log10_pval, color = model_formula_family)) +
     geom_point(alpha = 0.4) +
     geom_abline(slope = 1, intercept = 0, color = "gray") +
-    geom_point(data = observed_points, aes(x = expected, y = observed_chisq), shape = 4, size = 4, stroke = 1.5) + # "X"
-    geom_text(data = observed_points, aes(x = expected, y = observed_chisq, label = label), vjust = -1, color = "black", size = 3) +
+    geom_point(data = observed_points, aes(x = expected_neg_log10, y = observed_neg_log10), 
+               shape = 4, size = 4, stroke = 1.5) + # "X"
+    geom_text_repel(data = observed_points, 
+                    aes(x = expected_neg_log10,
+                        y = observed_neg_log10,
+                        label = label,
+                        color = model_formula_family), 
+                    size = 3,
+                    min.segment.length = 0,  # Always draw connecting lines
+                    segment.color = "black",
+                    segment.alpha = 0.6,
+                    box.padding = 0.5,       # Space around labels
+                    point.padding = 0.3,     # Space around points
+                    force = 2,               # Repulsion strength
+                    max.overlaps = Inf) +    # Allow all labels to be shown
+    scale_x_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
     labs(
-      x = "Expected Chi-sq",
-      y = "Observed Chi-sq",
+      x = "Expected -log10(p-value)",
+      y = "Observed -log10(p-value)",
       color = "Model Formula",
-      title = "QQ Plot of Permuted vs Observed Interaction Chi-Sq (Multiple Models)"
+      title = "QQ Plot of Permuted vs Observed P-values (Multiple Models)"
     ) +
-    theme_bw()
+    theme_bw() +
+    theme(
+      legend.position = "bottom",
+      legend.direction = "vertical"
+    )
 }
+
 ```
 
 \newpage
 ### Create a grid of models and plot them together
-First plot is all tested models
+
 ```{r}
 # Define models we'd like to try
 model_grid <- tibble(
   model_formula = list(
     as.formula("CPM ~ condition * genotype.num + (1 | donor)"),
+    as.formula("CPM ~ condition * genotype.num + (1 | phase/donor)"),
     as.formula("CPM ~ condition * genotype.num"),
     as.formula("counts ~ condition * genotype.num"),
     as.formula("counts ~ condition * genotype.num + (1 | donor)"),
     as.formula("counts ~ condition * genotype.num + (1 | donor)")
   ),
-  model_type = c("lmer", "glm", "glm", "glmer", "glmer.nb"),
-  family = list(NA, gaussian(), poisson(), poisson(), NA)
+  model_type = c("lmer", "lmer", "glm", "glm", "glmer", "glmer.nb"),
+  family = list(NA, NA, gaussian(), poisson(), poisson(), NA)
 )
+```
 
+```{r, include=FALSE, message=FALSE, warning=FALSE}
 # Run all models and return one flat dataframe
 flat_qq_results <- pmap_dfr(
   list(model_grid$model_formula, model_grid$model_type, model_grid$family),
@@ -326,19 +332,26 @@ flat_qq_results <- pmap_dfr(
       family = if (inherits(family, "family")) family$family else NA_character_
     ) %>%
       bind_cols(result) %>%
-      select(-"model_formula...10") %>%
-      rename(model_formula="model_formula...1")
-      
+      rename(model_formula = 1,
+             se = std.error) %>%
+      select(!contains("..."))
   }
 )
-
-plot_qq_chisq_multi(flat_qq_results)
 ```
 
+\newpage
+First plot is all tested models
+```{r}
+#plot the results
+plot1 <- plot_qq_pval_multi(flat_qq_results)
+plot1
+```
+\newpage
 Second plot is only the non-poisson models to "zoom in"
 ```{r}
-plot_qq_chisq_multi(
+plot2 <- plot_qq_pval_multi(
   filter(flat_qq_results, is.na(family) | family != "poisson")
 )
+plot2
 ```
 
