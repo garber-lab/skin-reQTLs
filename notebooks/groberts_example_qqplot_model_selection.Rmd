@@ -354,4 +354,12 @@ plot2 <- plot_qq_pval_multi(
 )
 plot2
 ```
+Third plot is only the CPM models to "zoom in" even more
+```{r}
+plot3 <- plot_qq_pval_multi(
+  filter(flat_qq_results, str_detect(model_formula, "CPM"))
+)
+plot3
+```
+
 
