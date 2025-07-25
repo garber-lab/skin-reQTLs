@@ -28,6 +28,26 @@ rankNorm <- function (y) {
 }
 ```
 
+metadata$biosample = paste0(metadata$donor,"_",metadata$celltype, "_", metadata$condition)
+df = data.frame(biosample=metadata$biosample, 
+                donor=metadata$donor_num,
+                counts=as.numeric(counts["ERAP2",]), 
+                CPM=as.numeric(CPM["ERAP2",]),
+                libsize=colSums(counts))
+df.MELIFNG = df[metadata$celltype=="MEL"&metadata$condition=="IFNG",]
+df.MELIFNG$rankNormCPM=rankNorm(df.MELIFNG$CPM)
+metadata.MELIFNG = metadata[metadata$celltype=="MEL"&metadata$condition=="IFNG",]
+
+df.MEL = df[metadata$celltype=="MEL"&(metadata$condition=="PBS"|metadata$condition=="IFNG"),]
+df.MEL$rankNormCPM=rankNorm(df.MEL$CPM)
+metadata.MEL = metadata[metadata$celltype=="MEL"&(metadata$condition=="PBS"|metadata$condition=="IFNG"),]
+
+outDir="/pi/manuel.garber-umw/human/skin/eQTLs/DREG/2025models/test1/"
+saveRDS(df.MELIFNG, paste0(outDir,"/ERAP_expression_MEL_IFNG.rds"))
+saveRDS(metadata.MELIFNG, paste0(outDir,"/metadata_MEL_IFNG.rds"))
+saveRDS(df.MEL, paste0(outDir,"/ERAP_expression_MEL_PBSandIFNG.rds"))
+saveRDS(metadata.MEL, paste0(outDir,"/metadata_MEL_PBSandIFNG.rds"))
+```
 
 # load data
 ```{r load}
