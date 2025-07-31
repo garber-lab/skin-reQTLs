@@ -3,7 +3,7 @@
 #BSUB -R "span[hosts=1]"
 #BSUB -R rusage[mem=300000]
 #BSUB -q long
-#BSUB -W 10:00
+#BSUB -W 72:00
 #BSUB -J plinkQC
 #BSUB -e "./job_%J.err"
 #BSUB -o "./job_%J.out"
