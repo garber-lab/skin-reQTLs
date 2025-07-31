@@ -1,5 +1,5 @@
 #!/bin/bash
-#BSUB -n 1
+#BSUB -n 4
 #BSUB -R "span[hosts=1]"
 #BSUB -R rusage[mem=300000]
 #BSUB -q long
